@@ -1,0 +1,8 @@
+.streamlit/secrets.toml
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+DejaVuSans.ttf
+.fuse_hidden*

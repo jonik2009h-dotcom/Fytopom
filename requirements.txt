@@ -1,0 +1,11 @@
+# Po prvním úspěšném lokálním spuštění doporučuji přepnout na přesné verze:
+#   pip freeze > requirements.lock.txt
+streamlit>=1.50,<2
+streamlit-folium>=0.20
+folium>=0.16
+fpdf2>=2.8
+numpy>=1.26
+pandas>=2.2
+Pillow>=10.4
+google-genai>=1.0
+supabase>=2.9
