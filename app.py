@@ -619,39 +619,26 @@ def validate_and_load_image(file) -> Optional[Image.Image]:
 
 def foto_vstup(key: str, popisek: str, max_fotek: int = 6) -> List[Image.Image]:
     """
-    Maximálně zjednodušený uploader pro odhalení problému s galerií.
+    Jediný čistý uploader. Mobilní zařízení samo nabídne fotoaparát i galerii.
     """
     obrazky: List[Image.Image] = []
-    
-    st.markdown(f"**{popisek}**")
-    
+
     soubory = st.file_uploader(
-        "Vyberte fotky z galerie",
+        popisek,
         type=["jpg", "jpeg", "png", "webp", "heic", "heif"],
         accept_multiple_files=True,
-        key=f"{key}_debug_uploader",
+        key=f"{key}_cisty_uploader",
     )
     
     if soubory:
-        for soubor in soubory:
-            try:
-                # Otevření přímo přes PIL bez složitých draft filtrů
-                img = Image.open(soubor)
-                img = ImageOps.exif_transpose(img)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
+        sloupce = st.columns(min(len(soubory), 4))
+        for i, soubor in enumerate(soubory):
+            img = validate_and_load_image(soubor)
+            if img:
                 img.thumbnail((1024, 1024))
                 obrazky.append(img)
-                st.success(f"Fotka '{soubor.name}' byla úspěšně načtena!")
-            except Exception as e:
-                st.error(f"Chyba při zpracování souboru {soubor.name}: {e}")
-
-    # Náhled nahraných fotek
-    if obrazky:
-        sloupce = st.columns(min(len(obrazky), 4))
-        for i, img in enumerate(obrazky):
-            with sloupce[i % len(sloupce)]:
-                st.image(img, caption=f"Foto {i + 1}", use_container_width=True)
+                with sloupce[i % len(sloupce)]:
+                    st.image(img, caption=f"Foto {i + 1}", use_container_width=True)
 
     return obrazky[:max_fotek]
 def get_live_weather(lat: float, lon: float) -> dict:
