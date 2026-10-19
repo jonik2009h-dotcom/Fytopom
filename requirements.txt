@@ -6,6 +6,6 @@ folium>=0.16
 fpdf2>=2.8
 numpy>=1.26
 pandas>=2.2
-Pillow>=10.4
+pillow-heif>=0.18
 google-genai>=1.0
 supabase>=2.9

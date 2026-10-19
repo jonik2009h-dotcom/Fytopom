@@ -1,5 +1,6 @@
 import datetime
 import html
+import base64
 import io
 import json
 import logging
@@ -18,7 +19,16 @@ import folium
 from fpdf import FPDF
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageOps
+
+try:  # Podpora HEIC/HEIF (fotky z iPhonů a některých Androidů)
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except Exception:  # knihovna není povinná, aplikace funguje i bez ní
+    pass
+
+# Moderní telefony dělají fotky i přes 100 Mpx; JPEG se dekóduje zmenšeně (draft), takže je to bezpečné.
+Image.MAX_IMAGE_PIXELS = 200_000_000
 import streamlit as st
 import streamlit.components.v1 as components
 from streamlit_folium import st_folium
@@ -103,7 +113,8 @@ logging.basicConfig(
 logger = logging.getLogger("Fytopom")
 
 ALLOWED_COLUMNS = {"typ_analyzy", "nazev_zaznamu", "registrovano_dne", "datum_vysadby"}
-MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE_MB = 30
+MAX_PIXELS_NON_JPEG = 60_000_000
 MAX_IMAGE_PIXELS = 25_000_000
 
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
@@ -565,13 +576,16 @@ db_engine = DatabaseEngine()
 
 def validate_and_load_image(file) -> Optional[Image.Image]:
     """
-    Bezpečně zkontroluje velikost, rozlišení a validitu obrázku.
+    Bezpečně zkontroluje velikost, rozlišení a validitu obrázku (včetně fotek z mobilu:
+    HEIC/WebP, velká rozlišení, natočení podle EXIF) a vrátí RGB obrázek.
     """
     if file is None:
         return None
 
+    nazev_souboru = SecurityManager.sanitize_input(getattr(file, "name", "fotografie"))
+
     if file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        st.error(f"Soubor {SecurityManager.sanitize_input(file.name)} přesahuje maximální povolenou velikost {MAX_FILE_SIZE_MB} MB.")
+        st.error(f"Soubor {nazev_souboru} je příliš velký (maximum je {MAX_FILE_SIZE_MB} MB).")
         return None
 
     try:
@@ -581,13 +595,104 @@ def validate_and_load_image(file) -> Optional[Image.Image]:
 
         file_bytes.seek(0)
         img = Image.open(file_bytes)
+        puvodni_format = (img.format or "").upper()
+
+        if puvodni_format == "JPEG":
+            # Zmenšené dekódování: rychlé a šetří paměť i u 50-200 Mpx fotek
+            img.draft("RGB", (2048, 2048))
+        elif img.width * img.height > MAX_PIXELS_NON_JPEG:
+            st.error(f"Fotografie {nazev_souboru} má příliš vysoké rozlišení. Zkuste ji uložit jako JPEG.")
+            return None
+
         img.load()
+        img = ImageOps.exif_transpose(img)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
         return img
     except Exception as e:
         logger.error(f"Neplatný obrázek nebo překročení limitů: {e}")
-        st.error(f"Soubor {SecurityManager.sanitize_input(file.name)} není platný obrázek nebo překračuje povolené rozlišení.")
+        if str(getattr(file, "name", "")).lower().endswith((".heic", ".heif")):
+            st.error(f"Formát HEIC se u souboru {nazev_souboru} nepodařilo načíst. Zkuste fotku uložit jako JPEG.")
+        else:
+            st.error(f"Soubor {nazev_souboru} není platný obrázek nebo ho nelze zpracovat.")
         return None
-        
+
+_PHOTO_COMPONENT = None
+try:
+    _photo_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photo_input")
+    if os.path.isfile(os.path.join(_photo_dir, "index.html")):
+        _PHOTO_COMPONENT = components.declare_component("fytopom_photo_input", path=_photo_dir)
+    else:
+        logger.warning("Složka photo_input nenalezena, používá se klasický výběr souborů.")
+except Exception as _e:
+    logger.error(f"Vlastní vstup pro fotografie se nepodařilo načíst: {_e}")
+    _PHOTO_COMPONENT = None
+
+
+class _BytesUpload:
+    """Lehký obal, aby šly bajty z vlastního vstupu zpracovat stejnou validací jako soubor z uploaderu."""
+
+    def __init__(self, name: str, data: bytes):
+        self.name = name
+        self._data = data
+        self.size = len(data)
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+def foto_vstup(key: str, popisek: str, max_fotek: int = 6) -> List[Image.Image]:
+    """
+    Spolehlivé nahrávání fotografií na mobilu i na počítači.
+    Hlavní vstup využívá běžný výběr prohlížeče (telefon sám nabídne fotoaparát i galerii)
+    a fotografie zmenšuje přímo v telefonu. Záložní klasický uploader je bez omezení
+    přípon, takže jde vybrat i fotka z galerie nebo z Google Fotek.
+    """
+    obrazky: List[Image.Image] = []
+
+    if _PHOTO_COMPONENT is not None:
+        try:
+            hodnota = _PHOTO_COMPONENT(label=popisek, max_photos=max_fotek, key=key, default=[])
+        except Exception as e:
+            logger.error(f"Chyba vlastního vstupu pro fotografie: {e}")
+            hodnota = []
+        for idx, polozka in enumerate(hodnota or []):
+            try:
+                data_url = str(polozka.get("data", ""))
+                if len(data_url) > 14 * 1024 * 1024:
+                    continue
+                raw = base64.b64decode(data_url.split(",", 1)[-1])
+                img = validate_and_load_image(_BytesUpload(str(polozka.get("name") or f"foto_{idx + 1}.jpg"), raw))
+                if img:
+                    img.thumbnail((1024, 1024))
+                    obrazky.append(img)
+            except Exception as e:
+                logger.error(f"Chyba při zpracování fotografie z mobilu: {e}")
+
+    if _PHOTO_COMPONENT is not None:
+        kontejner = st.expander("Nefunguje nahrávání? Zkuste klasický výběr souboru")
+    else:
+        kontejner = st.container()
+
+    with kontejner:
+        soubory = st.file_uploader(
+            popisek if _PHOTO_COMPONENT is None else "Klasický výběr souboru",
+            accept_multiple_files=True,
+            key=f"{key}_klasicky",
+        )
+        if soubory:
+            sloupce = st.columns(min(len(soubory), 4))
+            for i, soubor in enumerate(soubory):
+                img = validate_and_load_image(soubor)
+                if img:
+                    img.thumbnail((1024, 1024))
+                    obrazky.append(img)
+                    with sloupce[i % len(sloupce)]:
+                        st.image(img, caption=f"Foto {i + 1}", width="stretch")
+
+    return obrazky[:max_fotek]
+
+
 def get_live_weather(lat: float, lon: float) -> dict:
     """Stáhne aktuální meteo data s opakováním a lokálním fallbackem při výpadku."""
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,precipitation,weathercode&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Europe/Prague"
@@ -1717,43 +1822,12 @@ else:
     if "Určení odrůdy" in selected_tab_name:
         st.markdown("###  Odborný průvodce určením odrůdy ")
                     
-        valid_images = []
         st.markdown("---")
-        
-        zdroj_fotky = st.radio(
-            "Zvolte způsob vložení fotografií plodu:",
-            ["📁 Vybrat soubory z galerie / zařízení", "📷 Vyfotit"],
-            horizontal=True,
-            key="zdroj_foto_odruda"
-        )
 
-        if "📁" in zdroj_fotky:
-            uploaded_files = st.file_uploader(
-                "Nahrajte detailní fotografie plodu (pohled z boku, řez, kalich, stopka):",
-                type=["jpg", "jpeg", "png"],
-                accept_multiple_files=True,
-                key="upload_tab1_gallery",
-            )
-            if uploaded_files:
-                num_cols = min(len(uploaded_files), 4)
-                cols = st.columns(num_cols)
-                for idx, file in enumerate(uploaded_files):
-                    img = validate_and_load_image(file)
-                    if img:
-                        img.thumbnail((1024, 1024))
-                        valid_images.append(img)
-                        bezpecny_index = idx % len(cols)
-                        with cols[bezpecny_index]:
-                            st.image(img, caption=f"Foto {idx+1}", width="stretch")
-        else:
-            st.info("💡 Po kliknutí na tlačítko níže se aktivuje fotoaparát vašeho zařízení.")
-            camera_file = st.camera_input("Vyfotit", key="camera_input_tab1")
-            if camera_file is not None:
-                img = validate_and_load_image(camera_file)
-                if img:
-                    img.thumbnail((1024, 1024))
-                    valid_images.append(img)
-                    st.image(img, caption="Zachycený snímek", width="stretch")
+        valid_images = foto_vstup(
+            "foto_odruda",
+            "Fotografie plodu (z boku, řez, kalich, stopka). Je volitelná, můžete zadat i jen popis a rozměry.",
+        )
 
         hmotnost = 0.0
         vyska = 0.0
@@ -1763,7 +1837,7 @@ else:
         vybrany_mesic = "Nevím / Nezadáno"
         vlastni_poznamka = ""
 
-        if valid_images:
+        with st.container():
             st.markdown("---")
             st.markdown("####  Morfologické a stanovištní parametry")
             col_m1, col_m2, col_m3 = st.columns(3)
@@ -1845,7 +1919,9 @@ else:
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button(" Spustit analýzu odrůdy", type="primary"):
-            if not api_key:
+            if not (valid_images or vlastni_poznamka.strip() or hmotnost > 0 or vyska > 0 or sirka > 0):
+                st.warning("Zadejte alespoň jednu fotografii, popis plodu nebo jeho rozměry a hmotnost.")
+            elif not api_key:
                 st.error("Chybí Google API klíč v nastavení!")
             elif not check_rate_limit("odruda_analysis", max_pozadavku=3, okno_sekund=60):
                 st.error("Dosaženo bezpečnostního limitu pro analýzy. Počkejte prosím minutu.")
@@ -1864,6 +1940,11 @@ else:
 
                             safe_poznamka = SecurityManager.clean_prompt_text(vlastni_poznamka)
 
+                            bez_fotek_pokyn = (
+                                ""
+                                if valid_images
+                                else "\nUPOZORNĚNÍ: Nejsou k dispozici žádné fotografie. Pravidlo o kontrole snímku se nepoužije. Urči odrůdy výhradně z textového popisu a rozměrů, uveď nižší pravděpodobnosti a výslovně napiš, že chybí vizuální ověření."
+                            )
                             pomolog_prompt = f"""
 Jsi špičkový expert v oboru pomologie a determinace odrůd ovocných stromů. Čerpej VÝHRADNĚ ze standardů ČSOP a ověřených českých pomologických atlasů.
 
@@ -1876,7 +1957,7 @@ Pokud na fotografiích NENÍ ovocný plod (např. obličej, auto, budova), vrať
 
 DATA OD UŽIVATELE:
 Lokalita GPS: {txt_lok}, Nadmořská výška: {nadmorska_vyska}, Věk stromu: {vek_stromu}, Hmotnost plodu: {hmotnost}g, Rozměry: {vyska}x{sirka}mm, Měsíc sklizně: {vybrany_mesic}.
-Popis: {safe_poznamka}
+Popis: {safe_poznamka}{bez_fotek_pokyn}
 """
                             response = call_gemini_with_retry(
                                 client,
@@ -2240,33 +2321,16 @@ Popis: {safe_poznamka}
         )
 
         st.markdown("---")
-        zdroj_fotky_choroba = st.radio(
-            "7. Zvolte způsob vložení fotografií poškozených částí rostliny:",
-            ["📁 Vybrat soubory z galerie / zařízení", "📷 Vyfotit"],
-            horizontal=True,
-            key="zdroj_foto_choroba",
+        valid_choroba_images = foto_vstup(
+            "foto_choroba",
+            "Fotografie poškozených částí rostliny. Je volitelná, můžete zadat i jen popis příznaků.",
         )
 
-        uploaded_choroba_files = []
-        if "📁" in zdroj_fotky_choroba:
-            uploaded_choroba_files = st.file_uploader(
-                "Nahrajte fotografie poškozených částí rostliny:",
-                type=["jpg", "jpeg", "png"],
-                accept_multiple_files=True,
-                key="upload_tab4",
-            ) or []
-        else:
-            st.info("💡 Po kliknutí na tlačítko níže se aktivuje fotoaparát vašeho zařízení.")
-            camera_choroba = st.camera_input("Vyfotit poškozenou část rostliny", key="camera_input_tab4")
-            if camera_choroba is not None:
-                uploaded_choroba_files = [camera_choroba]
-
-        if (
-            druh_dreviny
-            and uploaded_choroba_files
-            and st.button("Spustit fytopatologickou diagnostiku", type="primary")
-        ):
-            if not api_key:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Spustit fytopatologickou diagnostiku", type="primary"):
+            if not (druh_dreviny.strip() or valid_choroba_images or vlastni_opis_choroby.strip()):
+                st.warning("Zadejte alespoň druh rostliny, popis příznaků nebo nahrajte fotografii.")
+            elif not api_key:
                 st.error("Chybí Google API klíč v konfiguraci!")
             elif not check_rate_limit("fytopatologie_analysis", max_pozadavku=3, okno_sekund=60):
                 st.error("Dosaženo bezpečnostního limitu pro fytopatologickou analýzu. Chvíli počkejte.")
@@ -2276,20 +2340,14 @@ Popis: {safe_poznamka}
                         if not client:
                             st.error("API klient není inicializován. Zkontrolujte API klíč.")
                         else:
-                            valid_choroba_images = []
-                            for f in uploaded_choroba_files:
-                                img = validate_and_load_image(f)
-                                if img:
-                                    img.thumbnail((1024, 1024))
-                                    valid_choroba_images.append(img)
-
-                            if not valid_choroba_images:
-                                st.error("Žádná z fotografií není platný obrázek. Nahrajte nebo pořiďte snímek znovu.")
-                                st.stop()
-
-                            safe_drevina = SecurityManager.sanitize_input(druh_dreviny)
+                            safe_drevina = SecurityManager.sanitize_input(druh_dreviny) or "Nezadáno"
                             safe_opis = SecurityManager.clean_prompt_text(vlastni_opis_choroby)
 
+                            bez_fotek_pokyn_ch = (
+                                ""
+                                if valid_choroba_images
+                                else "\nUPOZORNĚNÍ: Nejsou k dispozici žádné fotografie. Pravidlo o kontrole snímku se nepoužije. Vycházej výhradně z textového popisu, uveď nižší pravděpodobnosti a výslovně napiš, že chybí vizuální ověření."
+                            )
                             fytopatolog_prompt = f"""
 Jsi expert fytopatolog čerpající ze standardů Rostlinolékařského portálu ÚKZÚZ ČR.
 
@@ -2302,7 +2360,7 @@ Pokud na fotografiích NENÍ rostlina nebo její poškození, vrať JSON ve tvar
 
 VSTUPNÍ DATA:
 Druh rostliny: {safe_drevina}, Zasažený orgán: {zasazeny_organ}, Měsíc pozorování: {mesic_pozorovani}, Míra napadení: {mira_napadeni}.
-Popis: {safe_opis}
+Popis: {safe_opis}{bez_fotek_pokyn_ch}
 """
                             response = call_gemini_with_retry(
                                 client,
@@ -2890,4 +2948,3 @@ POSKYTNI STRUKTUROVANOU ZPRÁVU (přehledně pomocí Markdownu) obsahující tyt
 # =====================================================================
 # --- KONEC SOUBORU APP.PY ---
 # =====================================================================
-
