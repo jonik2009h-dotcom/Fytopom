@@ -619,46 +619,35 @@ def validate_and_load_image(file) -> Optional[Image.Image]:
 
 def foto_vstup(key: str, popisek: str, max_fotek: int = 6) -> List[Image.Image]:
     """
-    Spolehlivé nahrávání pro mobil i PC oddělené na přímé focení a výběr z galerie.
+    Maximálně zjednodušený uploader pro odhalení problému s galerií.
     """
     obrazky: List[Image.Image] = []
     
     st.markdown(f"**{popisek}**")
     
-    # Přepínač, aby si uživatel na mobilu mohl vybrat, odkud fotku chce
-    metoda = st.radio(
-        "Způsob přidání fotky:",
-        ["📁 Vybrat z galerie / souborů", "📸 Vyfotit fotoaparátem"],
-        key=f"{key}_metoda",
-        horizontal=True
+    soubory = st.file_uploader(
+        "Vyberte fotky z galerie",
+        type=["jpg", "jpeg", "png", "webp", "heic", "heif"],
+        accept_multiple_files=True,
+        key=f"{key}_debug_uploader",
     )
     
-    if "Vyfotit fotoaparátem" in metoda:
-        # Nativní mobilní fotoaparát
-        kamera_soubor = st.camera_input("Zacilte a vyfoťte", key=f"{key}_camera")
-        if kamera_soubor:
-            img = validate_and_load_image(kamera_soubor)
-            if img:
+    if soubory:
+        for soubor in soubory:
+            try:
+                # Otevření přímo přes PIL bez složitých draft filtrů
+                img = Image.open(soubor)
+                img = ImageOps.exif_transpose(img)
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
                 img.thumbnail((1024, 1024))
                 obrazky.append(img)
-    else:
-        # Výběr ze souborů / galerie (lze vybrat i více fotek naráz)
-        soubory = st.file_uploader(
-            "Vyberte fotky ze zařízení",
-            type=["jpg", "jpeg", "png", "webp", "heic", "heif"],
-            accept_multiple_files=True,
-            key=f"{key}_uploader",
-        )
-        if soubory:
-            for soubor in soubory:
-                img = validate_and_load_image(soubor)
-                if img:
-                    img.thumbnail((1024, 1024))
-                    obrazky.append(img)
+                st.success(f"Fotka '{soubor.name}' byla úspěšně načtena!")
+            except Exception as e:
+                st.error(f"Chyba při zpracování souboru {soubor.name}: {e}")
 
-    # Zobrazení náhledů úspěšně načtených fotek
+    # Náhled nahraných fotek
     if obrazky:
-        st.write(f"Zatím připraveno fotek: {len(obrazky)}/{max_fotek}")
         sloupce = st.columns(min(len(obrazky), 4))
         for i, img in enumerate(obrazky):
             with sloupce[i % len(sloupce)]:
