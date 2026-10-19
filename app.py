@@ -619,29 +619,52 @@ def validate_and_load_image(file) -> Optional[Image.Image]:
 
 def foto_vstup(key: str, popisek: str, max_fotek: int = 6) -> List[Image.Image]:
     """
-    Spolehlivé nahrávání fotografií na mobilu i na počítači pomocí nativního uploaderu.
+    Spolehlivé nahrávání pro mobil i PC oddělené na přímé focení a výběr z galerie.
     """
     obrazky: List[Image.Image] = []
-
-    soubory = st.file_uploader(
-        popisek,
-        type=["jpg", "jpeg", "png", "heic", "heif", "webp"],
-        accept_multiple_files=True,
-        key=f"{key}_klasicky",
+    
+    st.markdown(f"**{popisek}**")
+    
+    # Přepínač, aby si uživatel na mobilu mohl vybrat, odkud fotku chce
+    metoda = st.radio(
+        "Způsob přidání fotky:",
+        ["📁 Vybrat z galerie / souborů", "📸 Vyfotit fotoaparátem"],
+        key=f"{key}_metoda",
+        horizontal=True
     )
     
-    if soubory:
-        sloupce = st.columns(min(len(soubory), 4))
-        for i, soubor in enumerate(soubory):
-            img = validate_and_load_image(soubor)
+    if "Vyfotit fotoaparátem" in metoda:
+        # Nativní mobilní fotoaparát
+        kamera_soubor = st.camera_input("Zacilte a vyfoťte", key=f"{key}_camera")
+        if kamera_soubor:
+            img = validate_and_load_image(kamera_soubor)
             if img:
                 img.thumbnail((1024, 1024))
                 obrazky.append(img)
-                with sloupce[i % len(sloupce)]:
-                    st.image(img, caption=f"Foto {i + 1}", use_container_width=True)
+    else:
+        # Výběr ze souborů / galerie (lze vybrat i více fotek naráz)
+        soubory = st.file_uploader(
+            "Vyberte fotky ze zařízení",
+            type=["jpg", "jpeg", "png", "webp", "heic", "heif"],
+            accept_multiple_files=True,
+            key=f"{key}_uploader",
+        )
+        if soubory:
+            for soubor in soubory:
+                img = validate_and_load_image(soubor)
+                if img:
+                    img.thumbnail((1024, 1024))
+                    obrazky.append(img)
+
+    # Zobrazení náhledů úspěšně načtených fotek
+    if obrazky:
+        st.write(f"Zatím připraveno fotek: {len(obrazky)}/{max_fotek}")
+        sloupce = st.columns(min(len(obrazky), 4))
+        for i, img in enumerate(obrazky):
+            with sloupce[i % len(sloupce)]:
+                st.image(img, caption=f"Foto {i + 1}", use_container_width=True)
 
     return obrazky[:max_fotek]
-
 def get_live_weather(lat: float, lon: float) -> dict:
     """Stáhne aktuální meteo data s opakováním a lokálním fallbackem při výpadku."""
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,precipitation,weathercode&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Europe/Prague"
