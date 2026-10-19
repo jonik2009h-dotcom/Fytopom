@@ -617,81 +617,30 @@ def validate_and_load_image(file) -> Optional[Image.Image]:
             st.error(f"Soubor {nazev_souboru} není platný obrázek nebo ho nelze zpracovat.")
         return None
 
-_PHOTO_COMPONENT = None
-try:
-    _photo_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photo_input")
-    if os.path.isfile(os.path.join(_photo_dir, "index.html")):
-        _PHOTO_COMPONENT = components.declare_component("fytopom_photo_input", path=_photo_dir)
-    else:
-        logger.warning("Složka photo_input nenalezena, používá se klasický výběr souborů.")
-except Exception as _e:
-    logger.error(f"Vlastní vstup pro fotografie se nepodařilo načíst: {_e}")
-    _PHOTO_COMPONENT = None
-
-
-class _BytesUpload:
-    """Lehký obal, aby šly bajty z vlastního vstupu zpracovat stejnou validací jako soubor z uploaderu."""
-
-    def __init__(self, name: str, data: bytes):
-        self.name = name
-        self._data = data
-        self.size = len(data)
-
-    def getvalue(self) -> bytes:
-        return self._data
-
-
 def foto_vstup(key: str, popisek: str, max_fotek: int = 6) -> List[Image.Image]:
     """
-    Spolehlivé nahrávání fotografií na mobilu i na počítači.
-    Hlavní vstup využívá běžný výběr prohlížeče (telefon sám nabídne fotoaparát i galerii)
-    a fotografie zmenšuje přímo v telefonu. Záložní klasický uploader je bez omezení
-    přípon, takže jde vybrat i fotka z galerie nebo z Google Fotek.
+    Spolehlivé nahrávání fotografií na mobilu i na počítači pomocí nativního uploaderu.
     """
     obrazky: List[Image.Image] = []
 
-    if _PHOTO_COMPONENT is not None:
-        try:
-            hodnota = _PHOTO_COMPONENT(label=popisek, max_photos=max_fotek, key=key, default=[])
-        except Exception as e:
-            logger.error(f"Chyba vlastního vstupu pro fotografie: {e}")
-            hodnota = []
-        for idx, polozka in enumerate(hodnota or []):
-            try:
-                data_url = str(polozka.get("data", ""))
-                if len(data_url) > 14 * 1024 * 1024:
-                    continue
-                raw = base64.b64decode(data_url.split(",", 1)[-1])
-                img = validate_and_load_image(_BytesUpload(str(polozka.get("name") or f"foto_{idx + 1}.jpg"), raw))
-                if img:
-                    img.thumbnail((1024, 1024))
-                    obrazky.append(img)
-            except Exception as e:
-                logger.error(f"Chyba při zpracování fotografie z mobilu: {e}")
-
-    if _PHOTO_COMPONENT is not None:
-        kontejner = st.expander("Nefunguje nahrávání? Zkuste klasický výběr souboru")
-    else:
-        kontejner = st.container()
-
-    with kontejner:
-        soubory = st.file_uploader(
-            popisek if _PHOTO_COMPONENT is None else "Klasický výběr souboru",
-            accept_multiple_files=True,
-            key=f"{key}_klasicky",
-        )
-        if soubory:
-            sloupce = st.columns(min(len(soubory), 4))
-            for i, soubor in enumerate(soubory):
-                img = validate_and_load_image(soubor)
-                if img:
-                    img.thumbnail((1024, 1024))
-                    obrazky.append(img)
-                    with sloupce[i % len(sloupce)]:
-                        st.image(img, caption=f"Foto {i + 1}", width="stretch")
+    soubory = st.file_uploader(
+        popisek,
+        type=["jpg", "jpeg", "png", "heic", "heif", "webp"],
+        accept_multiple_files=True,
+        key=f"{key}_klasicky",
+    )
+    
+    if soubory:
+        sloupce = st.columns(min(len(soubory), 4))
+        for i, soubor in enumerate(soubory):
+            img = validate_and_load_image(soubor)
+            if img:
+                img.thumbnail((1024, 1024))
+                obrazky.append(img)
+                with sloupce[i % len(sloupce)]:
+                    st.image(img, caption=f"Foto {i + 1}", use_container_width=True)
 
     return obrazky[:max_fotek]
-
 
 def get_live_weather(lat: float, lon: float) -> dict:
     """Stáhne aktuální meteo data s opakováním a lokálním fallbackem při výpadku."""
