@@ -2,8 +2,8 @@
 headless = true
 enableXsrfProtection = true
 enableCORS = true
-# Odpovídá MAX_FILE_SIZE_MB v app.py (fotky z fotoaparátu i galerie)
-maxUploadSize = 10
+# Odpovídá MAX_FILE_SIZE_MB v app.py (fotky z mobilu mohou mít desítky MB)
+maxUploadSize = 30
 fileWatcherType = "none"
 runOnSave = false
 

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --surface:#111b16; --border:#223229; --text:#e7f0ea; --muted:#8fa699; --accent:#4ade80; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: transparent; color: var(--text);
+    font-family: Inter, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #file { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+  .drop { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 22px 14px;
+    border: 2px dashed rgba(74,222,128,.55); border-radius: 16px; background: rgba(74,222,128,.06);
+    cursor: pointer; text-align: center; -webkit-tap-highlight-color: transparent; }
+  .drop.over, .drop:active { background: rgba(74,222,128,.16); }
+  .title { font-size: 1.02rem; font-weight: 700; }
+  .hint { font-size: .85rem; color: var(--muted); }
+  .btn { margin-top: 6px; padding: 12px 22px; min-height: 48px; border-radius: 12px; font-weight: 700;
+    font-size: 1rem; color: #04180c; background: linear-gradient(135deg,#22c55e,#4ade80); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; margin-top: 12px; }
+  .item { position: relative; aspect-ratio: 1 / 1; border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--border); background: var(--surface); }
+  .item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .x { position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; border: none; border-radius: 50%;
+    background: rgba(0,0,0,.7); color: #fff; font-size: 18px; line-height: 32px; padding: 0; cursor: pointer; }
+  .msg { margin-top: 10px; font-size: .88rem; color: #fcd34d; }
+  .busy { margin-top: 10px; font-size: .88rem; color: var(--accent); }
+</style>
+</head>
+<body>
+  <input id="file" type="file" accept="image/*" multiple>
+  <label class="drop" id="drop" for="file">
+    <div class="title" id="label">Fotografie</div>
+    <div class="hint">Telefon nabídne fotoaparát nebo galerii. Na počítači můžete fotky přetáhnout sem.</div>
+    <div class="btn">📷 Přidat fotografie</div>
+  </label>
+  <div class="busy" id="busy" hidden>Zpracovávám fotografie…</div>
+  <div class="msg" id="msg" hidden></div>
+  <div class="grid" id="grid"></div>
+
+<script>
+(function () {
+  var MAX_SIDE = 1600, QUALITY = 0.85;
+  var photos = [], maxPhotos = 6;
+  var $ = function (id) { return document.getElementById(id); };
+
+  function send(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data || {}), "*");
+  }
+  function frame() {
+    send("streamlit:setFrameHeight", { height: Math.ceil(document.body.scrollHeight) + 6 });
+  }
+  function publish() {
+    send("streamlit:setComponentValue", {
+      value: photos.map(function (p) { return { name: p.name, data: p.data }; }),
+      dataType: "json"
+    });
+  }
+  function showMsg(text) {
+    var m = $("msg");
+    if (text) { m.textContent = text; m.hidden = false; } else { m.hidden = true; }
+    frame();
+  }
+
+  function render() {
+    var grid = $("grid");
+    grid.innerHTML = "";
+    photos.forEach(function (p, i) {
+      var d = document.createElement("div"); d.className = "item";
+      var img = document.createElement("img"); img.src = p.data; img.alt = "Fotografie " + (i + 1);
+      var b = document.createElement("button"); b.className = "x"; b.type = "button";
+      b.setAttribute("aria-label", "Odebrat fotografii"); b.textContent = "×";
+      b.addEventListener("click", function () { photos.splice(i, 1); render(); publish(); });
+      d.appendChild(img); d.appendChild(b); grid.appendChild(d);
+    });
+    frame();
+  }
+
+  function loadImage(file) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () { resolve({ img: img, url: url }); };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error("decode")); };
+      img.src = url;
+    });
+  }
+
+  function processFile(file) {
+    return loadImage(file).then(function (r) {
+      var w = r.img.naturalWidth, h = r.img.naturalHeight;
+      var scale = Math.min(1, MAX_SIDE / Math.max(w, h));
+      w = Math.max(1, Math.round(w * scale)); h = Math.max(1, Math.round(h * scale));
+      var c = document.createElement("canvas"); c.width = w; c.height = h;
+      var ctx = c.getContext("2d");
+      ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(r.img, 0, 0, w, h);
+      URL.revokeObjectURL(r.url);
+      return c.toDataURL("image/jpeg", QUALITY);
+    });
+  }
+
+  async function handleFiles(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+    showMsg("");
+    $("busy").hidden = false; frame();
+    var problems = [];
+    for (var i = 0; i < files.length; i++) {
+      if (photos.length >= maxPhotos) { problems.push("Maximum je " + maxPhotos + " fotografií."); break; }
+      try {
+        var data = await processFile(files[i]);
+        photos.push({ name: (files[i].name || ("foto_" + (photos.length + 1))).replace(/\.[^.]+$/, "") + ".jpg", data: data });
+      } catch (e) {
+        problems.push("Soubor " + (files[i].name || "") + " se nepodařilo načíst. Zkuste jiný snímek nebo formát JPEG.");
+      }
+    }
+    $("busy").hidden = true;
+    render(); publish();
+    showMsg(problems.join(" "));
+  }
+
+  $("file").addEventListener("change", function (e) {
+    var list = e.target.files;
+    handleFiles(list).then(function () { e.target.value = ""; });
+  });
+
+  var drop = $("drop");
+  ["dragenter", "dragover"].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add("over"); });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove("over"); });
+  });
+  drop.addEventListener("drop", function (e) { handleFiles(e.dataTransfer && e.dataTransfer.files); });
+
+  window.addEventListener("message", function (ev) {
+    var d = ev.data;
+    if (d && d.type === "streamlit:render") {
+      var a = d.args || {};
+      if (a.max_photos) maxPhotos = a.max_photos;
+      if (a.label) $("label").textContent = a.label;
+      frame();
+    }
+  });
+
+  if (window.ResizeObserver) { new ResizeObserver(frame).observe(document.body); }
+  send("streamlit:componentReady", { apiVersion: 1 });
+  frame();
+})();
+</script>
+</body>
+</html>
